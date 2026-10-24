@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>학교 미세먼지 AI 모니터링 & 스마트 환기 시스템</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Font Awesome Icons CDN -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  
+  <!-- React 18 & ReactDOM & Babel CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- Custom Styling -->
+  <style>
+    @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+    body {
+      font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+      background-color: #f8fafc;
+    }
+    .pulse-animation {
+      animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .5; }
+    }
+  </style>
+</head>
+<body class="text-slate-800">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // 환경부 미세먼지 기준 판단 함수
+    const getPM10Status = (val) => {
+      if (val <= 30) return { label: '좋음', color: 'bg-blue-500', text: 'text-blue-600', bgLight: 'bg-blue-50', border: 'border-blue-200', icon: 'fa-face-smile' };
+      if (val <= 80) return { label: '보통', color: 'bg-green-500', text: 'text-green-600', bgLight: 'bg-green-50', border: 'border-green-200', icon: 'fa-face-meh' };
+      if (val <= 150) return { label: '나쁨', color: 'bg-orange-500', text: 'text-orange-600', bgLight: 'bg-orange-50', border: 'border-orange-200', icon: 'fa-face-frown' };
+      return { label: '매우 나쁨', color: 'bg-red-600', text: 'text-red-600', bgLight: 'bg-red-50', border: 'border-red-200', icon: 'fa-face-dizzy' };
+    };
+
+    const getPM25Status = (val) => {
+      if (val <= 15) return { label: '좋음', color: 'bg-blue-500', text: 'text-blue-600', bgLight: 'bg-blue-50', border: 'border-blue-200', icon: 'fa-face-smile' };
+      if (val <= 35) return { label: '보통', color: 'bg-green-500', text: 'text-green-600', bgLight: 'bg-green-50', border: 'border-green-200', icon: 'fa-face-meh' };
+      if (val <= 75) return { label: '나쁨', color: 'bg-orange-500', text: 'text-orange-600', bgLight: 'bg-orange-50', border: 'border-orange-200', icon: 'fa-face-frown' };
+      return { label: '매우 나쁨', color: 'bg-red-600', text: 'text-red-600', bgLight: 'bg-red-50', border: 'border-red-200', icon: 'fa-face-dizzy' };
+    };
+
+    function App() {
+      // 상태 관리
+      const [location, setLocation] = useState('1학년 1반 교실');
+      const [pm10, setPm10] = useState(24);
+      const [pm25, setPm25] = useState(12);
+      const [co2, setCo2] = useState(650); // ppm
+      const [isAutoSim, setIsAutoSim] = useState(true);
+      const [history, setHistory] = useState([
+        { time: '10:00', pm10: 22, pm25: 10 },
+        { time: '10:05', pm10: 25, pm25: 11 },
+        { time: '10:10', pm10: 28, pm25: 14 },
+        { time: '10:15', pm10: 24, pm25: 12 },
+      ]);
+
+      // Gemini AI 연동 관련
+      const [apiKey, setApiKey] = useState(localStorage.getItem('GEMINI_API_KEY') || '');
+      const [isModalOpen, setIsModalOpen] = useState(false);
+      const [aiLoading, setAiLoading] = useState(false);
+      const [aiReport, setAiReport] = useState(null);
+
+      // 제어 신호 계산
+      const pm10Status = getPM10Status(pm10);
+      const pm25Status = getPM25Status(pm25);
+
+      // 공기청정기 가동 조건: PM2.5 >= 36 또는 PM10 >= 81 (나쁨 이상)
+      const isPurifierOn = pm25 >= 36 || pm10 >= 81;
+      // 환기 권고 조건: PM2.5 <= 15 이고 CO2 >= 1000 이거나 미세먼지가 좋음일 때
+      const isVentilationRecommended = (pm25 <= 25 && pm10 <= 50) && (co2 >= 800);
+
+      // 실시간 시뮬레이션 루프
+      useEffect(() => {
+        let interval;
+        if (isAutoSim) {
+          interval = setInterval(() => {
+            setPm10(prev => Math.max(5, Math.min(220, prev + Math.floor(Math.random() * 9) - 4)));
+            setPm25(prev => Math.max(3, Math.min(120, prev + Math.floor(Math.random() * 7) - 3)));
+            setCo2(prev => Math.max(400, Math.min(1800, prev + Math.floor(Math.random() * 21) - 10)));
+          }, 3000);
+        }
+        return () => clearInterval(interval);
+      }, [isAutoSim]);
+
+      // 히스토리 기록
+      useEffect(() => {
+        const timeStr = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        setHistory(prev => {
+          const next = [...prev, { time: timeStr, pm10, pm25 }];
+          if (next.length > 12) next.shift();
+          return next;
+        });
+      }, [pm10, pm25]);
+
+      // API Key 저장
+      const handleSaveApiKey = (e) => {
+        e.preventDefault();
+        localStorage.setItem('GEMINI_API_KEY', apiKey);
+        setIsModalOpen(false);
+        alert('Gemini API 키가 저장되었습니다.');
+      };
+
+      // AI 진단 요청 (Gemini API)
+      const generateAIReport = async () => {
+        setAiLoading(true);
+        const promptText = `
+당신은 고등학교 과학 교사이자 공기질 모니터링 전문가입니다.
+현재 학교 [구역: ${location}]의 미세먼지 실시간 데이터는 다음과 같습니다.
+- 미세먼지(PM10): ${pm10} µg/m³ (상태: ${pm10Status.label})
+- 초미세먼지(PM2.5): ${pm25} µg/m³ (상태: ${pm25Status.label})
+- 이산화탄소(CO2): ${co2} ppm
+- 자동 공기청정기 신호: ${isPurifierOn ? '가동 중 (ON)' : '대기 중 (OFF)'}
+- 환기 안내 신호: ${isVentilationRecommended ? '환기 권고 (RECOMMENDED)' : '환기 불필요'}
+
+다음 3가지 목차로 고등학생(과학탐구실험 수강생) 눈높이에 맞춘 깔끔하고 명확한 진단 리포트를 작성해 주세요.
+1. 📊 [실시간 공기질 평가 및 위험성 요약]
+2. 🚨 [즉각적 행동 수칙 및 설비 제어 안내] (공기청정기/창문 환기 여부 포함)
+3. 🔬 [고등학교 과학탐구실험 연계 질문 3가지] (광산란 센서 측정 원리, 입자 크기별 체내 침투 메커니즘, 환기와 미세먼지 농도 관계 등)
+`;
+
+        if (!apiKey) {
+          // Fallback: API 키가 없을 때 자체 고품질 시뮬레이션 보고서 생성
+          setTimeout(() => {
+            setAiReport({
+              summary: `현재 ${location}의 PM10은 ${pm10}µg/m³, PM2.5는 ${pm25}µg/m³로 ${pm25Status.label} 수준입니다.`,
+              actions: isPurifierOn 
+                ? '⚠️ 미세먼지 농도가 심각 기준에 도달하여 자동 공기청정기가 ON으로 작동되었습니다. 외부 창문을 닫고 실내 순환을 유지하세요.'
+                : isVentilationRecommended
+                ? '🍃 외부 미세먼지 농도가 양호하고 실내 CO2 농도가 높아 창문을 열어 환기를 실시하는 것이 좋습니다.'
+                : '✅ 현재 실내 공기질이 쾌적한 상태입니다. 정기적인 모니터링을 유지하세요.',
+              questions: [
+                '1. 광산란 방식 미세먼지 센서에서 빛의 회절/산란 현상이 PM10과 PM2.5를 구별하는 원리는 무엇인가요?',
+                '2. PM10과 PM2.5가 인체 호흡기에 미치는 물리·생물학적 영향의 차이점은 무엇일까요?',
+                '3. 교실 내 인원 수 증가에 따른 CO2 농도 상승과 미세먼지 농도의 상관관계를 탐구하려면 어떤 변수를 통제해야 할까요?'
+              ],
+              isDemo: true
+            });
+            setAiLoading(false);
+          }, 1200);
+          return;
+        }
+
+        try {
+          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: promptText }] }]
+            })
+          });
+
+          const data = await res.json();
+          if (data.candidates && data.candidates[0].content) {
+            const rawText = data.candidates[0].content.parts[0].text;
+            setAiReport({ rawText, isDemo: false });
+          } else {
+            throw new Error('API 응답 형식 오류');
+          }
+        } catch (err) {
+          console.error(err);
+          alert('Gemini API 호출에 실패했습니다. API 키를 확인하시거나 시뮬레이션 모드로 결과를 확인합니다.');
+          setAiReport({
+            summary: `[시뮬레이션 모드] 현재 PM10: ${pm10}µg/m³, PM2.5: ${pm25}µg/m³ (${pm25Status.label})`,
+            actions: isPurifierOn ? '공기청정기 작동 필요' : '창문 환기 권고',
+            questions: [
+              '1. PM10과 PM2.5의 입자 크기 차이가 폐포 침투율에 미치는 영향을 설명하시오.',
+              '2. 센서 슬릿을 통과하는 입자의 질량을 빛의 산란 세기로 추정하는 물리적 계산 공식은 무엇인가요?',
+              '3. 풍속과 실내 환기 주기가 미세먼지 정화 시간에 미치는 영향을 조사하시오.'
+            ],
+            isDemo: true
+          });
+        } finally {
+          setAiLoading(false);
+        }
+      };
+
+      // 시뮬레이터 프리셋 설정
+      const setPreset = (type) => {
+        if (type === 'good') { setPm10(15); setPm25(8); setCo2(550); }
+        if (type === 'moderate') { setPm10(50); setPm25(25); setCo2(850); }
+        if (type === 'unhealthy') { setPm10(95); setPm25(48); setCo2(1100); }
+        if (type === 'severe') { setPm10(180); setPm25(95); setCo2(1450); }
+      };
+
+      return (
+        <div class="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
+          {/* Top Header */}
+          <header class="bg-slate-800/90 backdrop-blur border-b border-slate-700 px-6 py-4 sticky top-0 z-40 flex flex-wrap justify-between items-center gap-4">
+            <div class="flex items-center space-x-3">
+              <div class="bg-indigo-600 text-white p-2.5 rounded-xl text-xl shadow-lg shadow-indigo-500/30">
+                <i class="fa-solid fa-wind"></i>
+              </div>
+              <div>
+                <div class="flex items-center space-x-2">
+                  <h1 class="text-xl font-bold text-white tracking-wide">학교 미세먼지 AI 모니터링 & 스마트 환기</h1>
+                  <span class="text-xs bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded-full">
+                    고교 과학탐구실험 연계
+                  </span>
+                </div>
+                <p class="text-xs text-slate-400">Google AI Studio (Gemini) 연동 실시간 자동 제어 시스템</p>
+              </div>
+            </div>
+
+            <div class="flex items-center space-x-3">
+              {/* 장소 선택 */}
+              <select 
+                value={location} 
+                onChange={(e) => setLocation(e.target.value)}
+                class="bg-slate-700 text-slate-200 border border-slate-600 text-sm rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-500 outline-none"
+              >
+                <option value="1학년 1반 교실">🏫 1학년 1반 교실</option>
+                <option value="1학년 2반 교실">🏫 1학년 2반 교실</option>
+                <option value="과학탐구실험실">🔬 과학탐구실험실</option>
+                <option value="체육관">🏀 체육관</option>
+                <option value="학교 급식실">🍱 학교 급식실</option>
+              </select>
+
+              {/* API Key Modal Open Button */}
+              <button 
+                onClick={() => setIsModalOpen(true)}
+                class={`px-3 py-2 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition ${
+                  apiKey 
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30' 
+                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30'
+                }`}
+              >
+                <i class="fa-solid fa-key"></i>
+                <span>{apiKey ? 'API 키 등록됨' : 'API 키 설정'}</span>
+              </button>
+            </div>
+          </header>
+
+          {/* Main Dashboard Layout */}
+          <main class="flex-grow p-4 md:p-6 max-w-7xl w-full mx-auto space-y-6">
+            
+            {/* 1. Status Indicator Banner & Control Signal */}
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+              {/* PM10 Card */}
+              <div class={`p-5 rounded-2xl border ${pm10Status.bgLight} bg-opacity-10 ${pm10Status.border} backdrop-blur flex flex-col justify-between`}>
+                <div class="flex justify-between items-start">
+                  <div>
+                    <span class="text-xs font-medium text-slate-400">미세먼지 (PM10)</span>
+                    <h3 class="text-3xl font-extrabold text-white mt-1">
+                      {pm10} <span class="text-sm font-normal text-slate-400">µg/m³</span>
+                    </h3>
+                  </div>
+                  <span class={`px-3 py-1 rounded-full text-xs font-bold text-white ${pm10Status.color} shadow-md`}>
+                    {pm10Status.label}
+                  </span>
+                </div>
+                <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-between text-xs text-slate-400">
+                  <span>기준: 0~30 좋음 | 81~ 나쁨</span>
+                  <i class={`fa-solid ${pm10Status.icon} ${pm10Status.text} text-lg`}></i>
+                </div>
+              </div>
+
+              {/* PM2.5 Card */}
+              <div class={`p-5 rounded-2xl border ${pm25Status.bgLight} bg-opacity-10 ${pm25Status.border} backdrop-blur flex flex-col justify-between`}>
+                <div class="flex justify-between items-start">
+                  <div>
+                    <span class="text-xs font-medium text-slate-400">초미세먼지 (PM2.5)</span>
+                    <h3 class="text-3xl font-extrabold text-white mt-1">
+                      {pm25} <span class="text-sm font-normal text-slate-400">µg/m³</span>
+                    </h3>
+                  </div>
+                  <span class={`px-3 py-1 rounded-full text-xs font-bold text-white ${pm25Status.color} shadow-md`}>
+                    {pm25Status.label}
+                  </span>
+                </div>
+                <div class="mt-4 pt-3 border-t border-slate-700/50 flex items-center justify-between text-xs text-slate-400">
+                  <span>기준: 0~15 좋음 | 36~ 나쁨</span>
+                  <i class={`fa-solid ${pm25Status.icon} ${pm25Status.text} text-lg`}></i>
+                </div>
+              </div>
+
+              {/* Smart Actuator 1: Air Purifier Signal */}
+              <div class={`p-5 rounded-2xl border transition-all duration-300 ${
+                isPurifierOn 
+                  ? 'bg-rose-900/30 border-rose-500/50 shadow-lg shadow-rose-900/20' 
+                  : 'bg-slate-800/60 border-slate-700'
+              }`}>
+                <div class="flex justify-between items-center">
+                  <div class="flex items-center space-x-3">
+                    <div class={`w-10 h-10 rounded-xl flex items-center justify-center text-lg font-bold ${
+                      isPurifierOn ? 'bg-rose-500 text-white pulse-animation' : 'bg-slate-700 text-slate-400'
+                    }`}>
+                      <i class="fa-solid fa-fan"></i>
+                    </div>
+                    <div>
+                      <h4 class="text-sm font-semibold text-white">공기청정기 제어 신호</h4>
+                      <p class="text-xs text-slate-400">PM2.5 ≥ 36 또는 PM10 ≥ 81</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="mt-4 flex items-center justify-between">
+                  <span class="text-xs text-slate-400">자동 가동 신호:</span>
+                  <span class={`px-2.5 py-1 rounded-md text-xs font-bold ${
+                    isPurifierOn ? 'bg-rose-500 text-white' : 'bg-slate-700 text-slate-400'
+                  }`}>
+                    {isPurifierOn ? 'ON (자동 가동 중)' : 'OFF (대기 중)'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Smart Actuator 2: Ventilation Signal */}
+              <div class={`p-5 rounded-2xl border transition-all duration-300 ${
+                isVentilationRecommended 
+                  ? 'bg-emerald-900/30 border-emerald-500/50 shadow-lg shadow-emerald-900/20' 
+                  : 'bg-slate-800/60 border-slate-700'
+              }`}>
+                <div class="flex justify-between items-center">
+                  <div class="flex items-center space-x-3">
+                    <div class={`w-10 h-10 rounded-xl flex items-center justify-center text-lg font-bold ${
+                      isVentilationRecommended ? 'bg-emerald-500 text-white pulse-animation' : 'bg-slate-700 text-slate-400'
+                    }`}>
+                      <i class="fa-solid fa-door-open"></i>
+                    </div>
+                    <div>
+                      <h4 class="text-sm font-semibold text-white">창문 환기 안내 신호</h4>
+                      <p class="text-xs text-slate-400">미세먼지 쾌적 & CO2 수치 고려</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="mt-4 flex items-center justify-between">
+                  <span class="text-xs text-slate-400">환기 권고 상태:</span>
+                  <span class={`px-2.5 py-1 rounded-md text-xs font-bold ${
+                    isVentilationRecommended ? 'bg-emerald-500 text-white' : 'bg-slate-700 text-slate-400'
+                  }`}>
+                    {isVentilationRecommended ? 'RECOMMENDED (창문 개방)' : 'CLOSE (창문 닫기)'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* 2. Realtime Interactive Controls & Sensor Simulator */}
+            <div class="bg-slate-800/80 border border-slate-700 rounded-2xl p-6 space-y-4">
+              <div class="flex flex-wrap justify-between items-center gap-3">
+                <div class="flex items-center space-x-2">
+                  <i class="fa-solid fa-[#00d2ff] fa-sliders text-indigo-400"></i>
+                  <h3 class="text-base font-bold text-white">과학탐구실험 센서 데이터 시뮬레이터</h3>
+                  <span class="text-xs bg-slate-700 text-slate-300 px-2 py-0.5 rounded">실시간 테스트 전용</span>
+                </div>
+
+                <div class="flex items-center space-x-2">
+                  <button 
+                    onClick={() => setIsAutoSim(!isAutoSim)} 
+                    class={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center space-x-1.5 ${
+                      isAutoSim ? 'bg-indigo-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                    }`}
+                  >
+                    <i class={`fa-solid ${isAutoSim ? 'fa-pause' : 'fa-play'}`}></i>
+                    <span>{isAutoSim ? '실시간 데이터 변화 중지' : '실시간 데이터 자동 재생'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Sliders Grid */}
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-2">
+                <div>
+                  <div class="flex justify-between text-xs text-slate-300 mb-1">
+                    <span>PM10 슬라이더 조절:</span>
+                    <span class="font-bold text-indigo-400">{pm10} µg/m³</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="250" value={pm10}
+                    onChange={(e) => setPm10(Number(e.target.value))}
+                    class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <div class="flex justify-between text-xs text-slate-300 mb-1">
+                    <span>PM2.5 슬라이더 조절:</span>
+                    <span class="font-bold text-indigo-400">{pm25} µg/m³</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="150" value={pm25}
+                    onChange={(e) => setPm25(Number(e.target.value))}
+                    class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <div class="flex justify-between text-xs text-slate-300 mb-1">
+                    <span>이산화탄소 (CO2) 조절:</span>
+                    <span class="font-bold text-indigo-400">{co2} ppm</span>
+                  </div>
+                  <input 
+                    type="range" min="400" max="2000" value={co2}
+                    onChange={(e) => setCo2(Number(e.target.value))}
+                    class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                  />
+                </div>
+              </div>
+
+              {/* Quick Preset Buttons */}
+              <div class="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-700/60">
+                <span class="text-xs text-slate-400">환경 프리셋 원클릭 설정:</span>
+                <button onClick={() => setPreset('good')} class="px-2.5 py-1 bg-blue-500/20 border border-blue-500/30 text-blue-300 rounded text-xs hover:bg-blue-500/30">
+                  🍃 1단계 (좋음)
+                </button>
+                <button onClick={() => setPreset('moderate')} class="px-2.5 py-1 bg-green-500/20 border border-green-500/30 text-green-300 rounded text-xs hover:bg-green-500/30">
+                  🙂 2단계 (보통)
+                </button>
+                <button onClick={() => setPreset('unhealthy')} class="px-2.5 py-1 bg-orange-500/20 border border-orange-500/30 text-orange-300 rounded text-xs hover:bg-orange-500/30">
+                  😷 3단계 (나쁨 - 공기청정기 ON)
+                </button>
+                <button onClick={() => setPreset('severe')} class="px-2.5 py-1 bg-red-500/20 border border-red-500/30 text-red-300 rounded text-xs hover:bg-red-500/30">
+                  🚨 4단계 (매우나쁨 비상)
+                </button>
+              </div>
+            </div>
+
+            {/* 3. Trend Visualization & Gemini AI Analysis */}
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              
+              {/* Realtime Graph */}
+              <div class="bg-slate-800/80 border border-slate-700 rounded-2xl p-6 flex flex-col justify-between">
+                <div>
+                  <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-base font-bold text-white flex items-center space-x-2">
+                      <i class="fa-solid fa-chart-line text-indigo-400"></i>
+                      <span>실시간 미세먼지 농도 추이 그래프</span>
+                    </h3>
+                    <span class="text-xs text-slate-400">최근 12개 시점</span>
+                  </div>
+
+                  {/* SVG Line Chart */}
+                  <div class="h-52 w-full bg-slate-900/60 rounded-xl p-4 flex flex-col justify-between relative border border-slate-700/50">
+                    <div class="absolute top-2 right-4 flex items-center space-x-4 text-xs">
+                      <span class="flex items-center space-x-1">
+                        <span class="w-3 h-0.5 bg-orange-400 inline-block"></span>
+                        <span class="text-slate-300">PM10</span>
+                      </span>
+                      <span class="flex items-center space-x-1">
+                        <span class="w-3 h-0.5 bg-sky-400 inline-block"></span>
+                        <span class="text-slate-300">PM2.5</span>
+                      </span>
+                    </div>
+
+                    <svg class="w-full h-full overflow-visible" viewBox="0 0 300 120" preserveAspectRatio="none">
+                      {/* Grid Lines */}
+                      <line x1="0" y1="30" x2="300" y2="30" stroke="#334155" stroke-dasharray="2" />
+                      <line x1="0" y1="70" x2="300" y2="70" stroke="#334155" stroke-dasharray="2" />
+
+                      {/* PM10 Polyline */}
+                      {history.length > 1 && (
+                        <polyline
+                          fill="none"
+                          stroke="#fb923c"
+                          stroke-width="2.5"
+                          points={history.map((h, i) => `${(i / (history.length - 1)) * 300},${120 - Math.min(110, (h.pm10 / 180) * 110)}`).join(' ')}
+                        />
+                      )}
+
+                      {/* PM2.5 Polyline */}
+                      {history.length > 1 && (
+                        <polyline
+                          fill="none"
+                          stroke="#38bdf8"
+                          stroke-width="2.5"
+                          points={history.map((h, i) => `${(i / (history.length - 1)) * 300},${120 - Math.min(110, (h.pm25 / 100) * 110)}`).join(' ')}
+                        />
+                      )}
+                    </svg>
+
+                    <div class="flex justify-between text-[10px] text-slate-500 mt-1">
+                      {history.map((h, idx) => (
+                        <span key={idx}>{h.time}</span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-4 pt-3 border-t border-slate-700/60 flex justify-between text-xs text-slate-400">
+                  <span>💡 광산란 센서 모듈 데이터 동기화 완료</span>
+                  <span>갱신 주기: 3초</span>
+                </div>
+              </div>
+
+              {/* Gemini AI Diagnosis & Science Inquiry Guide Box */}
+              <div class="bg-gradient-to-br from-indigo-900/40 to-slate-800/90 border border-indigo-500/30 rounded-2xl p-6 flex flex-col justify-between">
+                <div>
+                  <div class="flex justify-between items-center mb-4">
+                    <div class="flex items-center space-x-2">
+                      <div class="bg-indigo-500 text-white p-1.5 rounded-lg text-sm">
+                        <i class="fa-solid fa-robot"></i>
+                      </div>
+                      <h3 class="text-base font-bold text-white">AI Studio (Gemini) 과학 탐구 진단 리포트</h3>
+                    </div>
+                    
+                    <button
+                      onClick={generateAIReport}
+                      disabled={aiLoading}
+                      class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition shadow-lg shadow-indigo-600/30 flex items-center space-x-2 disabled:opacity-50"
+                    >
+                      {aiLoading ? (
+                        <>
+                          <i class="fa-solid fa-spinner fa-spin"></i>
+                          <span>AI 분석 중...</span>
+                        </>
+                      ) : (
+                        <>
+                          <i class="fa-solid fa-wand-magic-sparkles"></i>
+                          <span>AI 탐구 분석 생성</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Report Display Box */}
+                  <div class="bg-slate-900/80 border border-slate-700/80 rounded-xl p-4 min-h-[220px] text-xs leading-relaxed space-y-3 overflow-y-auto max-h-[260px]">
+                    {!aiReport && !aiLoading && (
+                      <div class="h-full flex flex-col items-center justify-center text-slate-500 py-8 space-y-2">
+                        <i class="fa-solid fa-brain text-2xl text-slate-600"></i>
+                        <p>상단의 [AI 탐구 분석 생성] 버튼을 누르면</p>
+                        <p class="text-[11px]">실시간 미세먼지 수치 기반 과학 탐구 보고서가 자동 작성됩니다.</p>
+                      </div>
+                    )}
+
+                    {aiLoading && (
+                      <div class="h-full flex flex-col items-center justify-center text-indigo-300 py-12 space-y-3">
+                        <i class="fa-solid fa-circle-notch fa-spin text-3xl"></i>
+                        <p class="font-semibold">Gemini AI가 교실 환경 데이터를 심층 분석 중입니다...</p>
+                      </div>
+                    )}
+
+                    {aiReport && (
+                      <div>
+                        {aiReport.isDemo && (
+                          <div class="mb-3 px-2.5 py-1 bg-amber-500/20 text-amber-300 rounded border border-amber-500/30 text-[11px] flex justify-between items-center">
+                            <span><i class="fa-solid fa-circle-info"></i> API 키 미입력 상태로 시뮬레이션 진단 결과가 표시됩니다.</span>
+                          </div>
+                        )}
+
+                        {aiReport.rawText ? (
+                          <div class="whitespace-pre-line text-slate-200">
+                            {aiReport.rawText}
+                          </div>
+                        ) : (
+                          <div class="space-y-3">
+                            <div>
+                              <h4 class="font-bold text-indigo-300 mb-1">📊 실시간 공기질 평가 및 위험성</h4>
+                              <p class="text-slate-300">{aiReport.summary}</p>
+                            </div>
+                            <div>
+                              <h4 class="font-bold text-rose-300 mb-1">🚨 즉각적 행동 수칙 및 설비 제어</h4>
+                              <p class="text-slate-300">{aiReport.actions}</p>
+                            </div>
+                            <div>
+                              <h4 class="font-bold text-emerald-300 mb-1">🔬 고등학교 과학탐구실험 연계 질문</h4>
+                              <ul class="list-disc pl-4 space-y-1 text-slate-300">
+                                {aiReport.questions.map((q, i) => (
+                                  <li key={i}>{q}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div class="mt-3 text-[11px] text-slate-400 flex justify-between items-center">
+                  <span>모델: Google Gemini 2.5 Flash</span>
+                  <span class="text-indigo-400">교실 환경 및 학생 건강 지침 준수</span>
+                </div>
+              </div>
+
+            </div>
+
+            {/* 4. Korea Ministry of Environment Fine Dust Standards Reference Table */}
+            <div class="bg-slate-800/60 border border-slate-700/80 rounded-2xl p-6">
+              <h3 class="text-sm font-bold text-white mb-3 flex items-center space-x-2">
+                <i class="fa-solid fa-table-cells text-slate-400"></i>
+                <span>대한민국 환경부 미세먼지 환경기준 참고표 (µg/m³)</span>
+              </h3>
+              <div class="overflow-x-auto">
+                <table class="w-full text-xs text-center border-collapse">
+                  <thead>
+                    <tr class="bg-slate-700/60 text-slate-300 border-b border-slate-600">
+                      <th class="p-2 text-left">구분</th>
+                      <th class="p-2 bg-blue-500/20 text-blue-300">좋음 (Good)</th>
+                      <th class="p-2 bg-green-500/20 text-green-300">보통 (Moderate)</th>
+                      <th class="p-2 bg-orange-500/20 text-orange-300">나쁨 (Unhealthy)</th>
+                      <th class="p-2 bg-red-500/20 text-red-300">매우 나쁨 (Very Unhealthy)</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-700 text-slate-300">
+                    <tr>
+                      <td class="p-2 font-semibold text-left">미세먼지 (PM10)</td>
+                      <td class="p-2">0 ~ 30</td>
+                      <td class="p-2">31 ~ 80</td>
+                      <td class="p-2">81 ~ 150</td>
+                      <td class="p-2">151 이상</td>
+                    </tr>
+                    <tr>
+                      <td class="p-2 font-semibold text-left">초미세먼지 (PM2.5)</td>
+                      <td class="p-2">0 ~ 15</td>
+                      <td class="p-2">16 ~ 35</td>
+                      <td class="p-2">36 ~ 75</td>
+                      <td class="p-2">76 이상</td>
+                    </tr>
+                    <tr>
+                      <td class="p-2 font-semibold text-left text-slate-400">자동 설비 대응 규칙</td>
+                      <td class="p-2 text-emerald-400">창문 스마트 환기 안내</td>
+                      <td class="p-2 text-slate-400">자연 환기 모니터링</td>
+                      <td class="p-2 text-rose-400 font-bold">공기청정기 자동 ON</td>
+                      <td class="p-2 text-rose-500 font-bold">실외활동 중단 & 공기청정기 풀가동</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </main>
+
+          {/* API Key Config Modal */}
+          {isModalOpen && (
+            <div class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div class="bg-slate-800 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+                <div class="flex justify-between items-center">
+                  <h3 class="text-base font-bold text-white flex items-center space-x-2">
+                    <i class="fa-solid fa-key text-indigo-400"></i>
+                    <span>Google AI Studio API Key 설정</span>
+                  </h3>
+                  <button onClick={() => setIsModalOpen(false)} class="text-slate-400 hover:text-white">
+                    <i class="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                <p class="text-xs text-slate-300 leading-relaxed">
+                  Google AI Studio에서 발급받은 Gemini API 키를 입력하면 실시간으로 AI 탐구 분석 리포트를 생성할 수 있습니다. 
+                  (입력하지 않아도 내장 시뮬레이터로 작동합니다.)
+                </p>
+
+                <form onSubmit={handleSaveApiKey} class="space-y-4">
+                  <div>
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Gemini API Key</label>
+                    <input 
+                      type="password" 
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder="AIzaSy..."
+                      class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                    />
+                  </div>
+
+                  <div class="flex justify-end space-x-2 pt-2">
+                    <button 
+                      type="button" 
+                      onClick={() => setIsModalOpen(false)}
+                      class="px-4 py-2 bg-slate-700 text-slate-300 text-xs rounded-lg hover:bg-slate-600"
+                    >
+                      취소
+                    </button>
+                    <button 
+                      type="submit"
+                      class="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-500"
+                    >
+                      저장하기
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* Footer */}
+          <footer class="bg-slate-900 border-t border-slate-800 py-4 px-6 text-center text-xs text-slate-500">
+            <p>고등학교 과학탐구실험 연계 프로젝트 | AI 기반 실시간 학교 미세먼지 모니터링 & 스마트 환기 시스템</p>
+          </footer>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
